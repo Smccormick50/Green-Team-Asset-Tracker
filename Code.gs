@@ -68,6 +68,11 @@ function saveAsset(asset, photoPayloads) {
     throw new Error('You do not have permission to add or edit assets.');
   }
 
+  if (!photoPayloads && asset && Array.isArray(asset.photoPayloads)) {
+    photoPayloads = asset.photoPayloads;
+    delete asset.photoPayloads;
+  }
+
   asset = sanitizeAsset_(asset || {});
   const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_ASSETS);
   const values = sheet.getDataRange().getValues();
@@ -145,6 +150,32 @@ function deleteAsset(recordId) {
   throw new Error('Asset was not found.');
 }
 
+function listDeletedAssets() {
+  ensureSetup_();
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_DELETED);
+  const rows = getSheetObjects_(sheet);
+  return rows.map(r => {
+    r.Status = 'Retired';
+    return r;
+  });
+}
+
+function getDeletedAssets() {
+  return listDeletedAssets();
+}
+
+function loadDeletedAssets() {
+  return listDeletedAssets();
+}
+
+function getRetiredAssets() {
+  return listDeletedAssets();
+}
+
+function listRetiredAssets() {
+  return listDeletedAssets();
+}
+
 function getAssetByRecordId_(recordId) {
   const rows = listAssets();
   return rows.find(r => String(r['Record ID']) === String(recordId)) || null;
@@ -220,14 +251,46 @@ function getSheetObjects_(sheet) {
 }
 
 function sanitizeAsset_(asset) {
+  asset = asset || {};
+
+  // Accept both Google Sheet header names and the front-end camelCase names.
+  const aliases = {
+    'Record ID': ['Record ID', 'recordId', 'id'],
+    'Asset Number': ['Asset Number', 'Asset #', 'assetNumber', 'asset #', 'Asset#'],
+    'Brand': ['Brand', 'brand'],
+    'Tool Description': ['Tool Description', 'Tool Name', 'Tool', 'Asset Name', 'Description', 'Item', 'toolName'],
+    'Model Number': ['Model Number', 'Model', 'model'],
+    'Serial Number': ['Serial Number', 'Serial #', 'Serial', 'serial'],
+    'Asset Tag Y/N': ['Asset Tag Y/N', 'Asset Tag', 'assetTag'],
+    'Status': ['Status', 'status'],
+    'Location': ['Location', 'location'],
+    'Assigned To': ['Assigned To', 'Assigned', 'assignedTo', 'assigned'],
+    'Photo Folder URL': ['Photo Folder URL', 'Photo Folder', 'Photo Link', 'Photo Folder Link', 'photoFolder', 'photoUrl', 'photoLink'],
+    'Photo File URLs': ['Photo File URLs', 'Photo Files', 'photos', 'photoFiles'],
+    'Notes': ['Notes', 'notes'],
+    'Last Updated': ['Last Updated', 'lastUpdated'],
+    'Updated By': ['Updated By', 'updatedBy']
+  };
+
   const clean = {};
-  REQUIRED_ASSET_HEADERS.forEach(h => clean[h] = asset[h] || '');
-  clean['Asset Number'] = String(clean['Asset Number']).trim();
-  clean['Brand'] = String(clean['Brand']).trim();
-  clean['Tool Description'] = String(clean['Tool Description']).trim();
-  clean['Model Number'] = String(clean['Model Number']).trim();
-  clean['Serial Number'] = String(clean['Serial Number']).trim();
-  clean['Asset Tag Y/N'] = String(clean['Asset Tag Y/N']).trim().toUpperCase();
+  REQUIRED_ASSET_HEADERS.forEach(header => {
+    const keys = aliases[header] || [header];
+    let value = '';
+    for (let i = 0; i < keys.length; i++) {
+      if (asset[keys[i]] !== undefined && asset[keys[i]] !== null) {
+        value = asset[keys[i]];
+        break;
+      }
+    }
+    clean[header] = value;
+  });
+
+  clean['Asset Number'] = String(clean['Asset Number'] || '').trim();
+  clean['Brand'] = String(clean['Brand'] || '').trim();
+  clean['Tool Description'] = String(clean['Tool Description'] || '').trim();
+  clean['Model Number'] = String(clean['Model Number'] || '').trim();
+  clean['Serial Number'] = String(clean['Serial Number'] || '').trim();
+  clean['Asset Tag Y/N'] = String(clean['Asset Tag Y/N'] || '').trim().toUpperCase();
   clean['Status'] = clean['Status'] || 'Active';
   return clean;
 }
@@ -296,4 +359,69 @@ function dataUrlToBlob_(dataUrl, filename) {
   const contentType = contentTypeMatch ? contentTypeMatch[1] : 'image/jpeg';
   const bytes = Utilities.base64Decode(base64);
   return Utilities.newBlob(bytes, contentType, filename);
+}
+
+function syncExistingPhotoFoldersToAssets() {
+  ensureSetup_();
+
+  const root = getRootPhotoFolder_();
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_ASSETS);
+
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(String);
+
+  const assetNumberCol = headers.indexOf('Asset Number');
+  const photoFolderCol = headers.indexOf('Photo Folder URL');
+  const photoFilesCol = headers.indexOf('Photo File URLs');
+  const lastUpdatedCol = headers.indexOf('Last Updated');
+
+  if (assetNumberCol === -1) {
+    throw new Error('Missing Asset Number column.');
+  }
+
+  let updatedCount = 0;
+  let missingCount = 0;
+
+  for (let r = 1; r < values.length; r++) {
+    const assetNumber = String(values[r][assetNumberCol] || '').trim();
+    if (!assetNumber) continue;
+
+    const folders = root.getFoldersByName(assetNumber);
+
+    if (!folders.hasNext()) {
+      missingCount++;
+      continue;
+    }
+
+    const folder = folders.next();
+    const fileUrls = [];
+
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      fileUrls.push(file.getUrl());
+    }
+
+    if (photoFolderCol >= 0) {
+      sheet.getRange(r + 1, photoFolderCol + 1).setValue(folder.getUrl());
+    }
+
+    if (photoFilesCol >= 0) {
+      sheet.getRange(r + 1, photoFilesCol + 1).setValue(fileUrls.join('\n'));
+    }
+
+    if (lastUpdatedCol >= 0) {
+      sheet.getRange(r + 1, lastUpdatedCol + 1).setValue(new Date());
+    }
+
+    updatedCount++;
+  }
+
+  SpreadsheetApp.getUi().alert(
+    'Photo folder sync complete.\n\nUpdated assets: ' +
+    updatedCount +
+    '\nAssets without matching folder: ' +
+    missingCount
+  );
 }
